@@ -32,6 +32,7 @@ class TrackInfo:
     after: an.Measures | None = None
     hum: float | None = None
     clicks: int = 0
+    noises: int = 0
     breaths: int = 0
     pauses: int = 0
     timbre_db: float = 0.0
@@ -61,13 +62,15 @@ def evaluate(info: TrackInfo) -> Verdict:
         v.add(VERDE, "Il registratore lascia le pause in silenzio assoluto: ho aggiunto un leggero fondo di stanza, come chiede Audible.")
     if info.hum:
         v.add(VERDE, f"Ho tolto un ronzio elettrico ({int(info.hum)} Hz): controlla cavi e alimentatori vicino al microfono.")
+    if info.noises:
+        v.add(VERDE, f"Ho tolto {info.noises} rumori isolati nelle pause (click del mouse, tasti, colpi).")
     if info.clicks:
         v.add(VERDE, f"Ho attenuato {info.clicks} click o schiocchi di bocca.")
     if info.breaths:
         v.add(VERDE, f"Ho sistemato {info.breaths} respiri.")
     if info.pauses:
         v.add(VERDE, f"Ho accorciato {info.pauses} pause troppo lunghe.")
-    if info.timbre_db > 4.5:
+    if info.timbre_db > 3.5:
         v.add(GIALLO, "La voce suonava diversa dalle altre tracce (microfono spostato o giornata diversa): l'ho uniformata, ma ascolta il risultato.")
 
     a = info.after

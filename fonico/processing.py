@@ -31,7 +31,7 @@ def _fade_envelope(gain: np.ndarray, fade_s: float = 0.01) -> np.ndarray:
 # --- Pulizia --------------------------------------------------------------
 
 
-def highpass(audio: np.ndarray, cutoff: float = 75.0) -> np.ndarray:
+def highpass(audio: np.ndarray, cutoff: float = 85.0) -> np.ndarray:
     """Toglie i rimbombi sotto la voce (passi, traffico, vibrazioni del microfono)."""
     sos = signal.butter(4, cutoff, "highpass", fs=SR, output="sos")
     return signal.sosfilt(sos, audio).astype(np.float32)
@@ -207,6 +207,56 @@ def breaths(audio: np.ndarray, mode: str = "attenuali") -> tuple[np.ndarray, int
     return (audio * _fade_envelope(env, 0.015)).astype(np.float32), count
 
 
+DEREVERB = {"leggera": 0.6, "normale": 1.0, "forte": 1.4}
+
+
+def dereverb(audio: np.ndarray, strength: str = "normale", t60_s: float = 0.5) -> np.ndarray:
+    """Riduce il rimbombo della stanza: stima la coda di riverbero dal suono di pochi istanti prima
+    e la sottrae (sottrazione spettrale del riverbero tardivo)."""
+    beta = DEREVERB[strength]
+    nper, hop = 1024, 256
+    _, _, spec = signal.stft(audio, fs=SR, nperseg=nper, noverlap=nper - hop)
+    power = np.abs(spec) ** 2
+    smooth = uniform_filter1d(power, size=3, axis=1, mode="nearest")
+    delay = max(1, int(0.05 * SR / hop))  # la coda "tardiva" inizia ~50 ms dopo il suono diretto
+    decay = 10 ** (-6.0 * (delay * hop / SR) / t60_s)  # quanto si è spenta la stanza in quel tempo
+    late = np.zeros_like(smooth)
+    late[:, delay:] = decay * smooth[:, :-delay]
+    gain = np.sqrt(np.clip(1.0 - beta * late / np.maximum(power, 1e-20), 0.0, 1.0))
+    gain = uniform_filter(gain, size=(3, 3), mode="nearest")
+    gain = np.maximum(gain, 10 ** (-12 / 20)).astype(np.float32)
+    _, out = signal.istft(spec * gain, fs=SR, nperseg=nper, noverlap=nper - hop)
+    return out[: audio.size].astype(np.float32)
+
+
+def remove_isolated_noises(audio: np.ndarray, max_s: float = 0.09, gap_s: float = 0.12) -> tuple[np.ndarray, int]:
+    """Toglie i rumori brevi e isolati nelle pause: click del mouse, tasti, colpi sul tavolo.
+
+    Una parola, anche brevissima, dura più di 90 ms; un click del mouse è un lampo circondato dal silenzio.
+    """
+    frame_s = 0.005
+    levels = an.frame_rms_db(audio, frame_s)
+    loud = np.percentile(levels, 90)
+    active = levels > max(np.percentile(levels, 10) + 8, loud - 40)
+    regs = an.regions(active)
+    frame = int(frame_s * SR)
+    gain = np.ones(audio.size, dtype=np.float32)
+    count = 0
+    for i, (a, b) in enumerate(regs):
+        if (b - a) * frame_s > max_s:
+            continue
+        before = (a - regs[i - 1][1]) if i else a + 10**6
+        after = (regs[i + 1][0] - b) if i + 1 < len(regs) else 10**6
+        if before * frame_s < gap_s or after * frame_s < gap_s:
+            continue
+        s, e = max(0, (a - 2) * frame), min(audio.size, (b + 4) * frame)
+        gain[s:e] = 0.0
+        count += 1
+    if not count:
+        return audio, 0
+    return (audio * _fade_envelope(gain, 0.004)).astype(np.float32), count
+
+
 # --- Pause e ambiente ------------------------------------------------------
 
 
@@ -285,13 +335,38 @@ def band_profile(audio: np.ndarray) -> np.ndarray:
     return profile - profile.mean()
 
 
+# Spettro medio di una voce parlata ben registrata (LTASS, Byrne et al. 1994, valori arrotondati),
+# negli stessi terzi d'ottava di BAND_CENTERS.
+SPEECH_TARGET = np.array(
+    [49, 54, 58, 59, 60, 60, 60, 59, 56, 53, 51, 50, 49, 47, 46, 45, 44, 43, 41, 40, 38], dtype=float
+)
+SPEECH_TARGET -= SPEECH_TARGET.mean()
+
+
+def reference_profile(profiles: list[np.ndarray], pull: float = 0.8) -> np.ndarray:
+    """Il timbro a cui portare tutte le tracce: la voce dell'attore, avvicinata a una voce da studio.
+
+    Senza questa spinta un attore che registra in una stanza che rimbomba resterebbe rimbombante
+    in tutte le tracce, solo in modo uniforme.
+    """
+    actor = np.median(np.stack(profiles), axis=0)
+    return (1 - pull) * actor + pull * SPEECH_TARGET
+
+
 def match_timbre(
-    audio: np.ndarray, profile: np.ndarray, reference: np.ndarray, strength: float = 0.7, max_db: float = 6.0
+    audio: np.ndarray,
+    profile: np.ndarray,
+    reference: np.ndarray,
+    strength: float = 0.9,
+    max_boost_db: float = 6.0,
+    max_cut_db: float = 10.0,
 ) -> tuple[np.ndarray, float]:
     """Equalizza la voce perché suoni come il riferimento. Restituisce anche la correzione massima."""
-    diff = np.clip((reference - profile) * strength, -max_db, max_db)
+    diff = (reference - profile) * strength
+    diff -= np.median(diff)  # conta la forma, non il volume
+    diff = np.clip(diff, -max_cut_db, max_boost_db)
+    diff[BAND_CENTERS < 220] = np.minimum(diff[BAND_CENTERS < 220], 0.0)  # mai aggiungere rimbombo
     diff = np.convolve(np.pad(diff, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
-    diff -= diff.mean()
     biggest = float(np.max(np.abs(diff)))
     if biggest < 0.5:
         return audio, biggest

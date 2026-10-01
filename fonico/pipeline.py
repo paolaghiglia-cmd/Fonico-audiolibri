@@ -44,7 +44,7 @@ class Session:
     def _clean(self, track: Track, project: Project) -> tuple[np.ndarray, np.ndarray, TrackInfo]:
         """Prima fase, uguale per ogni traccia: pulizia, respiri, pause."""
         s = project.settings
-        key = self._key(track, "clean", s.pulizia, s.respiri, 2)
+        key = self._key(track, "clean", s.pulizia, s.respiri, 3)
         body_f = self.cache / f"{key}_corpo.npy"
         tone_f = self.cache / f"{key}_stanza.npy"
         info_f = self.cache / f"{key}_info.json"
@@ -62,7 +62,9 @@ class Session:
         audio, info.hum = proc.remove_hum(audio)
         audio = proc.highpass(audio)
         audio, info.clicks = proc.declick(audio)
+        audio, info.noises = proc.remove_isolated_noises(audio)
         audio = proc.denoise(audio, s.pulizia)
+        audio = proc.dereverb(audio, s.pulizia)
         audio = proc.deess(audio)
         audio, info.breaths = proc.breaths(audio, s.respiri)
         tone = proc.quietest_segment(audio)
@@ -95,17 +97,20 @@ class Session:
             cleaned[t.path] = (body, tone, info)
             profiles[t.path] = proc.band_profile(body)
 
+        actor = np.median(np.stack(list(profiles.values())), axis=0)
         ref_path = project.settings.riferimento
         if ref_path in profiles:
-            reference = profiles[ref_path]
+            reference = proc.reference_profile([profiles[ref_path]])
         else:
-            reference = np.median(np.stack(list(profiles.values())), axis=0)
+            reference = proc.reference_profile(list(profiles.values()))
 
         self.results = {}
         for i, t in enumerate(tracks):
             progress((len(tracks) + i) / total, f"Uniformo voce e volume: {t.name}")
             body, tone, info = cleaned[t.path]
-            voice, info.timbre_db = self._voice(body, profiles[t.path], reference, project.settings.timbro)
+            voice, _ = self._voice(body, profiles[t.path], reference, project.settings.timbro)
+            # quanto questa traccia si allontana dalle altre dell'attore (non dalla voce da studio)
+            info.timbre_db = float(np.mean(np.abs(profiles[t.path] - actor)[proc.BAND_CENTERS < 6000]))
             np.save(self._voice_file(t), voice)
             np.save(self._tone_file(t), tone)
             final = proc.finalize([voice], tone, fill_silence=info.gated)

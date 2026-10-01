@@ -192,3 +192,75 @@ def test_registratore_che_taglia_i_silenzi_riceve_un_fondo_di_stanza():
     assert an.digital_silence_ratio(final) < 0.01
     assert -75.0 < m.noise_db <= an.ACX_NOISE_MAX
     assert an.ACX_RMS_MIN <= m.rms_db <= an.ACX_RMS_MAX
+
+
+def _room(x: np.ndarray, t60_s: float = 0.6, seed: int = 0) -> np.ndarray:
+    """Simula una stanza che rimbomba: risposta all'impulso a coda esponenziale."""
+    rng = np.random.default_rng(seed)
+    n = int(t60_s * SR)
+    t = np.arange(n) / SR
+    ir = rng.standard_normal(n) * 10 ** (-3 * t / t60_s)
+    ir[0] = np.sqrt(2.0 * np.sum(ir[1:] ** 2))  # suono diretto 3 dB sopra la stanza
+    wet = np.convolve(x, ir)[: x.size]
+    return (wet / np.max(np.abs(wet)) * np.max(np.abs(x))).astype(np.float32)
+
+
+def test_rimbombo_ridotto():
+    dry = speech(seconds=12, noise_db=-90, breaths=False)
+    wet = _room(dry)
+    silent = (np.abs(dry) < 1e-4).astype(float)
+    # dove la voce tace da almeno 60 ms resta solo la coda della stanza
+    pauses = np.convolve(silent, np.ones(int(0.06 * SR)), "full")[: dry.size] >= int(0.06 * SR)
+    tail_before = an.rms_db(wet[pauses]) - an.rms_db(wet)
+    out = proc.dereverb(wet)
+    tail_after = an.rms_db(out[pauses]) - an.rms_db(out)
+    assert tail_after < tail_before - 3.0
+
+
+def test_click_del_mouse_nelle_pause_tolti_parole_intatte():
+    x = speech(seconds=12, noise_db=-120, breaths=False, long_pause_s=2.0)
+    x[np.abs(x) < 3e-4] = 0.0
+    quiet = np.flatnonzero(np.convolve(np.abs(x) < 1e-9, np.ones(int(0.6 * SR)), "same") >= int(0.6 * SR) - 1)
+    pos = quiet[len(quiet) // 2]
+    click = np.zeros(int(0.02 * SR), dtype=np.float32)
+    click[:200] = 0.3 * np.random.default_rng(1).standard_normal(200) * np.exp(-np.arange(200) / 40)
+    dirty = x.copy()
+    dirty[pos : pos + click.size] += click
+    out, count = proc.remove_isolated_noises(dirty)
+    assert count == 1
+    assert np.max(np.abs(out[pos - 100 : pos + click.size + 100])) < 1e-3
+    _, none = proc.remove_isolated_noises(x)
+    assert none == 0
+    assert np.allclose(proc.remove_isolated_noises(x)[0], x)
+
+
+def _boom(x: np.ndarray) -> np.ndarray:
+    """Voce registrata in una stanza che rimbomba: +10 dB attorno a 250 Hz."""
+    import pedalboard as pb
+
+    return pb.PeakFilter(cutoff_frequency_hz=250, gain_db=10, q=0.8)(x, SR)
+
+
+def test_timbro_non_aggiunge_mai_bassi():
+    ref = proc.reference_profile([proc.band_profile(speech(seconds=12, seed=6))])
+    thin = speech(seconds=12, seed=7, tilt_db=10)
+    out, _ = proc.match_timbre(thin, proc.band_profile(thin), ref)
+    low = proc.BAND_CENTERS < 170
+    gain = proc.band_profile(out) - proc.band_profile(thin)
+    gain -= np.median(gain)
+    assert np.all(gain[low] < 1.5)
+
+
+def test_voce_rimbombante_schiarita_verso_lo_studio():
+    # Tutte le tracce dell'attore rimbombano allo stesso modo: uniformarle non basta.
+    tracks = [_boom(speech(seconds=12, seed=s)) for s in (5, 6, 7)]
+    profiles = [proc.band_profile(t) for t in tracks]
+    ref = proc.reference_profile(profiles)
+    mid = (proc.BAND_CENTERS >= 160) & (proc.BAND_CENTERS <= 400)
+    hi = (proc.BAND_CENTERS >= 1500) & (proc.BAND_CENTERS <= 4000)
+    out, _ = proc.match_timbre(tracks[0], profiles[0], ref)
+    before, after = profiles[0], proc.band_profile(out)
+    studio = proc.SPEECH_TARGET[mid].mean() - proc.SPEECH_TARGET[hi].mean()
+    excess_before = (before[mid].mean() - before[hi].mean()) - studio
+    excess_after = (after[mid].mean() - after[hi].mean()) - studio
+    assert excess_after < excess_before * 0.6
