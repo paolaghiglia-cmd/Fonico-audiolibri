@@ -264,3 +264,37 @@ def test_voce_rimbombante_schiarita_verso_lo_studio():
     excess_before = (before[mid].mean() - before[hi].mean()) - studio
     excess_after = (after[mid].mean() - after[hi].mean()) - studio
     assert excess_after < excess_before * 0.6
+
+
+def test_colpi_sordi_tolti_voce_intatta():
+    x = speech(seconds=10, seed=3, noise_db=-80)
+    thump = np.zeros_like(x)
+    pos = int(4.0 * SR)
+    n = int(0.15 * SR)
+    t = np.arange(n) / SR
+    thump[pos : pos + n] = 0.5 * np.sin(2 * np.pi * 70 * t) * np.exp(-t / 0.04)  # "p" esplosiva o urto
+    out, events = proc.deplosive(x + thump)
+    assert events >= 1
+    from scipy import signal
+
+    lows = signal.butter(4, 120, "lowpass", fs=SR, output="sos")
+    seg = slice(pos, pos + n)
+    before = an.rms_db(signal.sosfilt(lows, x + thump)[seg])
+    after = an.rms_db(signal.sosfilt(lows, out)[seg])
+    assert after < before - 8
+    clean, none = proc.deplosive(x)
+    assert none == 0
+    assert abs(an.rms_db(clean) - an.rms_db(x)) < 0.5
+
+
+def test_rumori_prima_e_dopo_la_lettura_silenziati():
+    voice = speech(seconds=10, seed=2, noise_db=-120, breaths=False)
+    start_click = np.zeros(int(1.0 * SR), dtype=np.float32)
+    start_click[2000:2600] = 0.2 * np.random.default_rng(0).standard_normal(600)
+    x = np.concatenate([start_click, voice, start_click])
+    out, changed = proc.clean_edges(x)
+    assert changed
+    assert np.max(np.abs(out[:2600])) < 1e-3
+    assert np.max(np.abs(out[-SR + 2000 : -SR + 2600])) < 1e-3
+    middle = slice(SR + int(1.5 * SR), SR + voice.size - int(1.5 * SR))
+    assert np.allclose(out[middle], x[middle])

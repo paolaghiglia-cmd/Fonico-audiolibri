@@ -44,7 +44,7 @@ class Session:
     def _clean(self, track: Track, project: Project) -> tuple[np.ndarray, np.ndarray, TrackInfo]:
         """Prima fase, uguale per ogni traccia: pulizia, respiri, pause."""
         s = project.settings
-        key = self._key(track, "clean", s.pulizia, s.respiri, 3)
+        key = self._key(track, "clean", s.pulizia, s.respiri, 4)
         body_f = self.cache / f"{key}_corpo.npy"
         tone_f = self.cache / f"{key}_stanza.npy"
         info_f = self.cache / f"{key}_info.json"
@@ -61,8 +61,11 @@ class Session:
         )
         audio, info.hum = proc.remove_hum(audio)
         audio = proc.highpass(audio)
+        audio, info.thumps = proc.deplosive(audio)
         audio, info.clicks = proc.declick(audio)
         audio, info.noises = proc.remove_isolated_noises(audio)
+        audio, edges = proc.clean_edges(audio)
+        info.noises += int(edges)
         audio = proc.denoise(audio, s.pulizia)
         audio = proc.dereverb(audio, s.pulizia)
         audio = proc.deess(audio)

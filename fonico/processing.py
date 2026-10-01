@@ -31,7 +31,7 @@ def _fade_envelope(gain: np.ndarray, fade_s: float = 0.01) -> np.ndarray:
 # --- Pulizia --------------------------------------------------------------
 
 
-def highpass(audio: np.ndarray, cutoff: float = 85.0) -> np.ndarray:
+def highpass(audio: np.ndarray, cutoff: float = 100.0) -> np.ndarray:
     """Toglie i rimbombi sotto la voce (passi, traffico, vibrazioni del microfono)."""
     sos = signal.butter(4, cutoff, "highpass", fs=SR, output="sos")
     return signal.sosfilt(sos, audio).astype(np.float32)
@@ -66,6 +66,36 @@ def remove_hum(audio: np.ndarray) -> tuple[np.ndarray, float | None]:
         out = signal.filtfilt(b, a, out)
         k += 1
     return out.astype(np.float32), f0
+
+
+def deplosive(audio: np.ndarray, max_red_db: float = 30.0) -> tuple[np.ndarray, int]:
+    """Toglie i colpi sordi: "p" esplosive sul microfono, urti, mani sul telefono o sul tavolo.
+
+    Si riconoscono perché per un attimo i bassissimi (sotto 160 Hz) superano di molto la voce stessa.
+    Una voce maschile profonda può avere i bassi alla pari della voce: quella non va toccata.
+    """
+    nper, hop = 2048, 512
+    freqs, _, spec = signal.stft(audio, fs=SR, nperseg=nper, noverlap=nper - hop)
+    power = np.abs(spec) ** 2
+    low_bins = freqs < 160
+    low = power[low_bins].sum(axis=0) + 1e-20
+    ref = power[(freqs >= 200) & (freqs < 2000)].sum(axis=0) + 1e-20
+    ratio = 10 * np.log10(low / ref)
+    level = 10 * np.log10(power.sum(axis=0) + 1e-20)
+    audible = level > np.percentile(level, 95) - 35  # nel silenzio il rapporto non significa nulla
+    # La voce profonda ha il picco dei bassi sulla sua nota (120-160 Hz); un colpo sordo sta più in basso
+    # (60-100 Hz) e domina di 20-30 dB.
+    peak_hz = freqs[low_bins][np.argmax(power[low_bins], axis=0)]
+    thump = audible & ((ratio > 20.0) | ((ratio > 10.0) & (peak_hz < 110)))
+    if not thump.any():
+        return audio, 0
+    red = np.where(thump, np.clip(ratio + 6.0, 0.0, max_red_db), 0.0)  # riporta i bassi 6 dB sotto la voce
+    red = maximum_filter1d(red, size=3, mode="nearest")
+    gains = np.ones(power.shape, dtype=np.float32)
+    gains[low_bins] = 10 ** (-red[None, :] / 20)
+    _, out = signal.istft(spec * gains, fs=SR, nperseg=nper, noverlap=nper - hop)
+    events = len(an.regions(thump))
+    return out[: audio.size].astype(np.float32), events
 
 
 def declick(audio: np.ndarray, max_click_s: float = 0.003) -> tuple[np.ndarray, int]:
@@ -229,7 +259,9 @@ def dereverb(audio: np.ndarray, strength: str = "normale", t60_s: float = 0.5) -
     return out[: audio.size].astype(np.float32)
 
 
-def remove_isolated_noises(audio: np.ndarray, max_s: float = 0.09, gap_s: float = 0.12) -> tuple[np.ndarray, int]:
+def remove_isolated_noises(
+    audio: np.ndarray, max_s: float = 0.09, max_unvoiced_s: float = 0.2, gap_s: float = 0.1
+) -> tuple[np.ndarray, int]:
     """Toglie i rumori brevi e isolati nelle pause: click del mouse, tasti, colpi sul tavolo.
 
     Una parola, anche brevissima, dura più di 90 ms; un click del mouse è un lampo circondato dal silenzio.
@@ -240,10 +272,15 @@ def remove_isolated_noises(audio: np.ndarray, max_s: float = 0.09, gap_s: float 
     active = levels > max(np.percentile(levels, 10) + 8, loud - 40)
     regs = an.regions(active)
     frame = int(frame_s * SR)
+    vf = 0.04
+    voicing = an.periodicity(audio, vf)
     gain = np.ones(audio.size, dtype=np.float32)
     count = 0
     for i, (a, b) in enumerate(regs):
-        if (b - a) * frame_s > max_s:
+        dur = (b - a) * frame_s
+        seg = voicing[int(a * frame_s / vf) : max(int(a * frame_s / vf) + 1, int(np.ceil(b * frame_s / vf)))]
+        voiced = seg.size and np.median(seg) > 0.5
+        if dur > (max_s if voiced else max_unvoiced_s):
             continue
         before = (a - regs[i - 1][1]) if i else a + 10**6
         after = (regs[i + 1][0] - b) if i + 1 < len(regs) else 10**6
@@ -255,6 +292,26 @@ def remove_isolated_noises(audio: np.ndarray, max_s: float = 0.09, gap_s: float 
     if not count:
         return audio, 0
     return (audio * _fade_envelope(gain, 0.004)).astype(np.float32), count
+
+
+def clean_edges(audio: np.ndarray, before_s: float = 0.25, after_s: float = 0.4) -> tuple[np.ndarray, bool]:
+    """Silenzia quello che c'è prima della prima parola e dopo l'ultima: il click per avviare e
+    fermare la registrazione, il fruscio del telefono preso in mano, i rumori di sistemazione."""
+    vf = 0.04
+    voicing = an.periodicity(audio, vf)
+    levels = an.frame_rms_db(audio, vf)[: voicing.size]
+    loud = np.percentile(levels, 95)
+    voiced = (voicing > 0.6) & (levels > loud - 30)
+    voiced = binary_closing(voiced, structure=np.ones(3))
+    words = [(a, b) for a, b in an.regions(voiced) if (b - a) * vf >= 0.2]
+    if not words:
+        return audio, False
+    start = max(0, int((words[0][0] * vf - before_s) * SR))
+    end = min(audio.size, int((words[-1][1] * vf + after_s) * SR))
+    gain = np.zeros(audio.size, dtype=np.float32)
+    gain[start:end] = 1.0
+    changed = bool(np.any(np.abs(audio[:start]) > 1e-4) or np.any(np.abs(audio[end:]) > 1e-4))
+    return (audio * _fade_envelope(gain, 0.03)).astype(np.float32), changed
 
 
 # --- Pause e ambiente ------------------------------------------------------

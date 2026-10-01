@@ -33,6 +33,7 @@ class TrackInfo:
     hum: float | None = None
     clicks: int = 0
     noises: int = 0
+    thumps: int = 0
     breaths: int = 0
     pauses: int = 0
     timbre_db: float = 0.0
@@ -62,6 +63,8 @@ def evaluate(info: TrackInfo) -> Verdict:
         v.add(VERDE, "Il registratore lascia le pause in silenzio assoluto: ho aggiunto un leggero fondo di stanza, come chiede Audible.")
     if info.hum:
         v.add(VERDE, f"Ho tolto un ronzio elettrico ({int(info.hum)} Hz): controlla cavi e alimentatori vicino al microfono.")
+    if info.thumps:
+        v.add(VERDE, f"Ho tolto {info.thumps} colpi sordi sul microfono (\"p\" esplosive, urti, mani sul telefono).")
     if info.noises:
         v.add(VERDE, f"Ho tolto {info.noises} rumori isolati nelle pause (click del mouse, tasti, colpi).")
     if info.clicks:

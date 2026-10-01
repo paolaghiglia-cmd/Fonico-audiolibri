@@ -92,6 +92,22 @@ def regions(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(starts.tolist(), ends.tolist()))
 
 
+def periodicity(audio: np.ndarray, frame_s: float = 0.04) -> np.ndarray:
+    """Per ogni finestra, quanto il suono è "intonato" (0 = soffio o rumore, 1 = vocale piena).
+
+    È il picco dell'autocorrelazione tra 70 e 400 Hz: la voce ha un'altezza, i rumori no.
+    """
+    frame = int(frame_s * SR)
+    n = audio.size // frame
+    if n == 0:
+        return np.zeros(0)
+    frames = audio[: n * frame].reshape(n, frame).astype(np.float64)
+    power = np.abs(np.fft.rfft(frames * np.hanning(frame), n=2 * frame, axis=1)) ** 2
+    autocorr = np.fft.irfft(power, axis=1)[:, :frame]
+    lags = slice(int(SR / 400), min(frame, int(SR / 70)))
+    return autocorr[:, lags].max(axis=1) / np.maximum(autocorr[:, 0], 1e-20)
+
+
 def digital_silence_ratio(audio: np.ndarray) -> float:
     """Quota di campioni a zero assoluto: alta quando il registratore taglia i silenzi."""
     return float(np.mean(np.abs(audio) < 1e-6)) if audio.size else 0.0
