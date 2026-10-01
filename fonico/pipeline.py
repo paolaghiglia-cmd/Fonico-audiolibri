@@ -44,7 +44,7 @@ class Session:
     def _clean(self, track: Track, project: Project) -> tuple[np.ndarray, np.ndarray, TrackInfo]:
         """Prima fase, uguale per ogni traccia: pulizia, respiri, pause."""
         s = project.settings
-        key = self._key(track, "clean", s.pulizia, s.respiri, 1)
+        key = self._key(track, "clean", s.pulizia, s.respiri, 2)
         body_f = self.cache / f"{key}_corpo.npy"
         tone_f = self.cache / f"{key}_stanza.npy"
         info_f = self.cache / f"{key}_info.json"
@@ -54,7 +54,11 @@ class Session:
             return np.load(body_f), np.load(tone_f), TrackInfo(**data)
 
         audio = audio_io.load(track.path)
-        info = TrackInfo(before=an.measure(audio), speech_db=proc.speech_level_db(audio))
+        info = TrackInfo(
+            before=an.measure(audio),
+            speech_db=proc.speech_level_db(audio),
+            gated=an.digital_silence_ratio(audio) > 0.02,
+        )
         audio, info.hum = proc.remove_hum(audio)
         audio = proc.highpass(audio)
         audio, info.clicks = proc.declick(audio)
@@ -104,7 +108,7 @@ class Session:
             voice, info.timbre_db = self._voice(body, profiles[t.path], reference, project.settings.timbro)
             np.save(self._voice_file(t), voice)
             np.save(self._tone_file(t), tone)
-            final = proc.finalize([voice], tone)
+            final = proc.finalize([voice], tone, fill_silence=info.gated)
             info.after = an.measure(final, true_peak=True)
             preview = self.cache / f"{self._key(t, 'anteprima')}.wav"
             audio_io.save_wav(preview, final)
@@ -132,7 +136,8 @@ class Session:
                 raise audio_io.AudioError(f"Prima premi \"Sistema la voce\": mancano {', '.join(missing)}.")
             bodies = [np.load(self._voice_file(t)) for t in tracks]
             tone = np.load(self._tone_file(tracks[0]))
-            final = proc.finalize(bodies, tone)
+            gated = any(self.results[t.path].info.gated for t in tracks)
+            final = proc.finalize(bodies, tone, fill_silence=gated)
             title = f"{project.titolo} - {name}" if project.titolo else name
             tags = {
                 "title": title,

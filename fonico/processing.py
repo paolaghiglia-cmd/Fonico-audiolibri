@@ -15,6 +15,7 @@ SPEECH_TARGET_DB = -18.0  # livello medio della voce prima della compressione
 FINAL_RMS_DB = -20.0  # centro della finestra ACX (-23 / -18)
 FINAL_PEAK_DB = -3.3  # margine sotto il limite ACX di -3 dB
 FINAL_NOISE_DB = -65.0  # margine sotto il limite ACX di -60 dB
+ROOM_FILL_DB = -70.0  # fondo di stanza aggiunto quando il registratore lascia silenzi a zero assoluto
 HEAD_S = 0.75
 TAIL_S = 2.0
 
@@ -82,7 +83,7 @@ def declick(audio: np.ndarray, max_click_s: float = 0.003) -> tuple[np.ndarray, 
     padded = np.pad(near, 9, mode="edge")
     ring = np.maximum(padded[:-18], padded[18:])
     floor = np.percentile(energy, 50) * 4 + 1e-14
-    spikes = (energy > 8.0 * ring) & (energy > floor)
+    spikes = (energy > 15.0 * ring) & (energy > floor)
     found = [
         (start * block, end * block)
         for start, end in an.regions(spikes)
@@ -174,7 +175,7 @@ def breaths(audio: np.ndarray, mode: str = "attenuali") -> tuple[np.ndarray, int
     silent = levels <= noise + 6
     candidate = (
         ~silent
-        & (levels < speech_level - 6)
+        & (levels < speech_level - 10)
         & (periodicity < 0.4)
         & (centroid < 5000)
     )
@@ -185,7 +186,7 @@ def breaths(audio: np.ndarray, mode: str = "attenuali") -> tuple[np.ndarray, int
     count = 0
     for start, end in an.regions(candidate):
         dur = (end - start) * 0.02
-        if not 0.12 <= dur <= 1.2:
+        if not 0.2 <= dur <= 1.2:
             continue
         before = silent[max(0, start - 3) : start].any() or start == 0
         after = silent[end : end + 3].any() or end == n
@@ -358,7 +359,18 @@ def quiet_pauses(audio: np.ndarray, target_db: float = FINAL_NOISE_DB) -> np.nda
     return (audio * _fade_envelope(env, 0.04)).astype(np.float32)
 
 
-def finalize(bodies: list[np.ndarray], tone_sample: np.ndarray, gap_s: float = 1.5) -> np.ndarray:
+def room_fill(size: int, level_db: float = ROOM_FILL_DB) -> np.ndarray:
+    """Un fondo di stanza sintetico, morbido e costante (rumore rosa-ish, sempre uguale)."""
+    rng = np.random.default_rng(12345)
+    noise = rng.standard_normal(size)
+    noise = signal.sosfilt(signal.butter(1, 2500, "lowpass", fs=SR, output="sos"), noise)
+    noise = signal.sosfilt(signal.butter(2, 80, "highpass", fs=SR, output="sos"), noise)
+    return (noise * 10 ** (level_db / 20) / np.sqrt(np.mean(noise**2))).astype(np.float32)
+
+
+def finalize(
+    bodies: list[np.ndarray], tone_sample: np.ndarray, gap_s: float = 1.5, fill_silence: bool = False
+) -> np.ndarray:
     """Monta i pezzi con silenzio in testa, tra le tracce e in coda, poi porta tutto alle specifiche."""
     parts = [room_tone(tone_sample, HEAD_S)]
     for i, body in enumerate(bodies):
@@ -374,6 +386,9 @@ def finalize(bodies: list[np.ndarray], tone_sample: np.ndarray, gap_s: float = 1
         if abs(an.rms_db(out) - FINAL_RMS_DB) < 0.3:
             break
     out = quiet_pauses(out)
+    if fill_silence:
+        # Audible scarta i file con silenzi a zero assoluto: serve un fondo di stanza continuo.
+        out = (out + room_fill(out.size)).astype(np.float32)
     tp = an.true_peak_db(out)
     if tp > FINAL_PEAK_DB:
         out = (out * 10 ** ((FINAL_PEAK_DB - tp) / 20)).astype(np.float32)

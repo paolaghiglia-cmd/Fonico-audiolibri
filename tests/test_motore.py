@@ -179,3 +179,16 @@ def test_progetto_salvato_e_riaperto(tmp_path):
     assert again.settings.respiri == "toglili"
     again.split_chapter([1])
     assert again.export_units()[1][0] == "b"
+
+
+def test_registratore_che_taglia_i_silenzi_riceve_un_fondo_di_stanza():
+    # Molti registratori (telefono, Registratore di Windows) mettono a zero assoluto le pause.
+    x = speech(seconds=15, level_db=-48, noise_db=-120)
+    x[np.abs(x) < 3e-4] = 0.0
+    assert an.digital_silence_ratio(x) > 0.02
+    body, _ = proc.tidy_pauses(proc.highpass(x))
+    final = proc.finalize([proc.compress(body)], np.zeros(0, dtype=np.float32), fill_silence=True)
+    m = an.measure(final, true_peak=True)
+    assert an.digital_silence_ratio(final) < 0.01
+    assert -75.0 < m.noise_db <= an.ACX_NOISE_MAX
+    assert an.ACX_RMS_MIN <= m.rms_db <= an.ACX_RMS_MAX

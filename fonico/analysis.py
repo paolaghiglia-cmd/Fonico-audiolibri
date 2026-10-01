@@ -92,6 +92,11 @@ def regions(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(starts.tolist(), ends.tolist()))
 
 
+def digital_silence_ratio(audio: np.ndarray) -> float:
+    """Quota di campioni a zero assoluto: alta quando il registratore taglia i silenzi."""
+    return float(np.mean(np.abs(audio) < 1e-6)) if audio.size else 0.0
+
+
 def clipping_regions(audio: np.ndarray, merge_s: float = 0.5) -> list[tuple[float, float]]:
     """Punti in cui la voce è saturata (distorta), in secondi."""
     hot = np.abs(audio) >= 0.98

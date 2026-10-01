@@ -36,6 +36,7 @@ class TrackInfo:
     pauses: int = 0
     timbre_db: float = 0.0
     speech_db: float = -20.0
+    gated: bool = False
 
 
 def evaluate(info: TrackInfo) -> Verdict:
@@ -47,16 +48,17 @@ def evaluate(info: TrackInfo) -> Verdict:
     if len(b.clipping) > 5:
         v.add(ROSSO, f"Ci sono altri {len(b.clipping) - 5} punti distorti: registra più lontano dal microfono o abbassa il volume di registrazione.")
 
-    if info.speech_db < -45:
-        v.add(ROSSO, "La registrazione è molto bassa: alzando la voce si alza anche il rumore. Avvicinati al microfono o alza il volume di registrazione.")
-    elif info.speech_db < -35:
-        v.add(GIALLO, "La registrazione è piuttosto bassa: l'ho alzata io, ma ascolta che il fondo sia pulito.")
+    if info.speech_db < -35:
+        v.add(GIALLO, "La registrazione è molto bassa: l'ho alzata io, ma ascolta che la voce sia pulita. "
+              "Per le prossime, avvicinati al microfono o alza il volume di registrazione.")
 
     if b.noise_db > -35:
         v.add(ROSSO, "C'è molto rumore di fondo: la pulizia potrebbe rendere la voce artificiale. Meglio registrare in un ambiente più silenzioso.")
     elif b.noise_db > -50:
         v.add(GIALLO, "C'era parecchio rumore di fondo e l'ho tolto: ascolta che la voce suoni naturale.")
 
+    if info.gated:
+        v.add(VERDE, "Il registratore lascia le pause in silenzio assoluto: ho aggiunto un leggero fondo di stanza, come chiede Audible.")
     if info.hum:
         v.add(VERDE, f"Ho tolto un ronzio elettrico ({int(info.hum)} Hz): controlla cavi e alimentatori vicino al microfono.")
     if info.clicks:
