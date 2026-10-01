@@ -31,7 +31,7 @@ def _fade_envelope(gain: np.ndarray, fade_s: float = 0.01) -> np.ndarray:
 # --- Pulizia --------------------------------------------------------------
 
 
-def highpass(audio: np.ndarray, cutoff: float = 100.0) -> np.ndarray:
+def highpass(audio: np.ndarray, cutoff: float = 80.0) -> np.ndarray:
     """Toglie i rimbombi sotto la voce (passi, traffico, vibrazioni del microfono)."""
     sos = signal.butter(4, cutoff, "highpass", fs=SR, output="sos")
     return signal.sosfilt(sos, audio).astype(np.float32)
@@ -156,7 +156,7 @@ def denoise(audio: np.ndarray, strength: str = "normale") -> np.ndarray:
     return out[: audio.size].astype(np.float32)
 
 
-def deess(audio: np.ndarray, max_red_db: float = 8.0) -> np.ndarray:
+def deess(audio: np.ndarray, max_red_db: float = 5.0) -> np.ndarray:
     """Attenua le "s" e le "z" troppo taglienti."""
     freqs, _, spec = signal.stft(audio, fs=SR, nperseg=1024, noverlap=768)
     band = (freqs >= 4500) & (freqs <= 10000)
@@ -237,13 +237,17 @@ def breaths(audio: np.ndarray, mode: str = "attenuali") -> tuple[np.ndarray, int
     return (audio * _fade_envelope(env, 0.015)).astype(np.float32), count
 
 
-DEREVERB = {"leggera": 0.6, "normale": 1.0, "forte": 1.4}
+# La sottrazione spettrale del riverbero, se spinta, rende la voce metallica: la usiamo solo
+# quando l'attore sceglie la pulizia "forte", e con mano leggera.
+DEREVERB = {"leggera": 0.0, "normale": 0.0, "forte": 0.7}
 
 
 def dereverb(audio: np.ndarray, strength: str = "normale", t60_s: float = 0.5) -> np.ndarray:
     """Riduce il rimbombo della stanza: stima la coda di riverbero dal suono di pochi istanti prima
     e la sottrae (sottrazione spettrale del riverbero tardivo)."""
     beta = DEREVERB[strength]
+    if beta <= 0:
+        return audio
     nper, hop = 1024, 256
     _, _, spec = signal.stft(audio, fs=SR, nperseg=nper, noverlap=nper - hop)
     power = np.abs(spec) ** 2
@@ -254,7 +258,7 @@ def dereverb(audio: np.ndarray, strength: str = "normale", t60_s: float = 0.5) -
     late[:, delay:] = decay * smooth[:, :-delay]
     gain = np.sqrt(np.clip(1.0 - beta * late / np.maximum(power, 1e-20), 0.0, 1.0))
     gain = uniform_filter(gain, size=(3, 3), mode="nearest")
-    gain = np.maximum(gain, 10 ** (-12 / 20)).astype(np.float32)
+    gain = np.maximum(gain, 10 ** (-6 / 20)).astype(np.float32)
     _, out = signal.istft(spec * gain, fs=SR, nperseg=nper, noverlap=nper - hop)
     return out[: audio.size].astype(np.float32)
 
@@ -400,7 +404,7 @@ SPEECH_TARGET = np.array(
 SPEECH_TARGET -= SPEECH_TARGET.mean()
 
 
-def reference_profile(profiles: list[np.ndarray], pull: float = 0.8) -> np.ndarray:
+def reference_profile(profiles: list[np.ndarray], pull: float = 0.3) -> np.ndarray:
     """Il timbro a cui portare tutte le tracce: la voce dell'attore, avvicinata a una voce da studio.
 
     Senza questa spinta un attore che registra in una stanza che rimbomba resterebbe rimbombante
@@ -414,15 +418,16 @@ def match_timbre(
     audio: np.ndarray,
     profile: np.ndarray,
     reference: np.ndarray,
-    strength: float = 0.9,
-    max_boost_db: float = 6.0,
-    max_cut_db: float = 10.0,
+    strength: float = 0.8,
+    max_boost_db: float = 3.0,
+    max_cut_db: float = 5.0,
 ) -> tuple[np.ndarray, float]:
     """Equalizza la voce perché suoni come il riferimento. Restituisce anche la correzione massima."""
     diff = (reference - profile) * strength
     diff -= np.median(diff)  # conta la forma, non il volume
     diff = np.clip(diff, -max_cut_db, max_boost_db)
-    diff[BAND_CENTERS < 220] = np.minimum(diff[BAND_CENTERS < 220], 0.0)  # mai aggiungere rimbombo
+    # Sotto i 220 Hz c'è la profondità della voce: mai aggiungere rimbombo, ma nemmeno svuotarla.
+    diff[BAND_CENTERS < 220] = np.clip(diff[BAND_CENTERS < 220], -1.5, 0.0)
     diff = np.convolve(np.pad(diff, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
     biggest = float(np.max(np.abs(diff)))
     if biggest < 0.5:
