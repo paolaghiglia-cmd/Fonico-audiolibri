@@ -53,6 +53,7 @@ jobs:
           pyinstaller --noconfirm --windowed --name Fonico
           --add-binary "ffmpeg_bin/ffmpeg.exe;."
           --add-data "ffmpeg_bin/FFMPEG-LICENSE.txt;."
+          --paths .
           --collect-submodules fonico
           packaging/avvio.py
       - name: Verifica il programma costruito
