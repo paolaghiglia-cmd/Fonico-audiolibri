@@ -1,0 +1,86 @@
+name: Test e installer Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install numpy scipy pedalboard pytest
+      - run: python -m pytest -q
+
+  windows:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Librerie
+        run: pip install numpy scipy pedalboard PySide6 pyinstaller pytest
+      - name: FFmpeg
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_zip
+          $bin = Get-ChildItem -Recurse -Filter ffmpeg.exe ffmpeg_zip | Select-Object -First 1
+          New-Item -ItemType Directory -Force ffmpeg_bin | Out-Null
+          Copy-Item $bin.FullName ffmpeg_bin\ffmpeg.exe
+          Copy-Item (Join-Path $bin.DirectoryName "ffprobe.exe") ffmpeg_bin\ffprobe.exe
+          $license = Get-ChildItem -Recurse -Filter LICENSE.txt ffmpeg_zip | Select-Object -First 1
+          if ($license) { Copy-Item $license.FullName ffmpeg_bin\FFMPEG-LICENSE.txt }
+          else { "FFmpeg (https://ffmpeg.org), build LGPL di BtbN/FFmpeg-Builds" | Out-File ffmpeg_bin\FFMPEG-LICENSE.txt }
+          "$PWD\ffmpeg_bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          & ffmpeg_bin\ffmpeg.exe -hide_banner -encoders | Select-String libmp3lame
+      - name: Test su Windows
+        run: python -m pytest -q
+      - name: Costruisci il programma
+        run: >
+          pyinstaller --noconfirm --windowed --name Fonico
+          --add-binary "ffmpeg_bin/ffmpeg.exe;."
+          --add-data "ffmpeg_bin/FFMPEG-LICENSE.txt;."
+          --paths .
+          --collect-submodules fonico
+          packaging/avvio.py
+      - name: Verifica il programma costruito
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $env:PATH = "C:\Windows\System32"
+          $report = "$env:TEMP\fonico_verifica.txt"
+          Remove-Item $report -ErrorAction SilentlyContinue
+          $p = Start-Process dist\Fonico\Fonico.exe -ArgumentList "--verifica" -PassThru
+          $null = $p.Handle  # senza questo PowerShell perde il codice di uscita
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); Write-Output "::error::Il programma non ha risposto in 5 minuti"; exit 1 }
+          $text = if (Test-Path $report) { (Get-Content $report -Raw) -replace "`r?`n", "%0A" } else { "nessun resoconto" }
+          if ($p.ExitCode -ne 0) { Write-Output "::error::Verifica fallita (codice $($p.ExitCode)): $text"; exit 1 }
+          Write-Output "::notice::Verifica riuscita: $text"
+      - name: Installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart("v") } else { "0.1.0" }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\fonico.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fonico-Setup
+          path: dist/Fonico-Setup-*.exe
+      - name: Pubblica la versione
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Fonico-Setup-*.exe
