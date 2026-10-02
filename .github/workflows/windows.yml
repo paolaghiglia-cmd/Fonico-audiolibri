@@ -60,10 +60,14 @@ jobs:
         timeout-minutes: 10
         run: |
           $env:PATH = "C:\Windows\System32"
+          $report = "$env:TEMP\fonico_verifica.txt"
+          Remove-Item $report -ErrorAction SilentlyContinue
           $p = Start-Process dist\Fonico\Fonico.exe -ArgumentList "--verifica" -PassThru
-          if (-not $p.WaitForExit(300000)) { $p.Kill(); Write-Output "Il programma non ha risposto in 5 minuti" }
-          if (Test-Path "$env:TEMP\fonico_verifica.txt") { Get-Content "$env:TEMP\fonico_verifica.txt" }
-          if (-not $p.HasExited -or $p.ExitCode -ne 0) { exit 1 }
+          $null = $p.Handle  # senza questo PowerShell perde il codice di uscita
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); Write-Output "::error::Il programma non ha risposto in 5 minuti"; exit 1 }
+          $text = if (Test-Path $report) { (Get-Content $report -Raw) -replace "`r?`n", "%0A" } else { "nessun resoconto" }
+          if ($p.ExitCode -ne 0) { Write-Output "::error::Verifica fallita (codice $($p.ExitCode)): $text"; exit 1 }
+          Write-Output "::notice::Verifica riuscita: $text"
       - name: Installer
         shell: pwsh
         run: |
