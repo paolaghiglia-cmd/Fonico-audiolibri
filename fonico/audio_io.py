@@ -43,6 +43,10 @@ def _run(args: list[str], input_bytes: bytes | None = None) -> bytes:
     kwargs = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    if input_bytes is None:
+        # Senza console ffmpeg resterebbe in attesa di comandi da tastiera.
+        args = ["-nostdin", *args]
+        kwargs["stdin"] = subprocess.DEVNULL
     proc = subprocess.run(
         [ffmpeg_path(), "-hide_banner", "-loglevel", "error", *args],
         input=input_bytes,

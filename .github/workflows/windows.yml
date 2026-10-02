@@ -57,11 +57,13 @@ jobs:
           packaging/avvio.py
       - name: Verifica il programma costruito
         shell: pwsh
+        timeout-minutes: 10
         run: |
           $env:PATH = "C:\Windows\System32"
-          $p = Start-Process dist\Fonico\Fonico.exe -ArgumentList "--verifica" -Wait -PassThru
-          Get-Content "$env:TEMP\fonico_verifica.txt"
-          if ($p.ExitCode -ne 0) { exit 1 }
+          $p = Start-Process dist\Fonico\Fonico.exe -ArgumentList "--verifica" -PassThru
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); Write-Output "Il programma non ha risposto in 5 minuti" }
+          if (Test-Path "$env:TEMP\fonico_verifica.txt") { Get-Content "$env:TEMP\fonico_verifica.txt" }
+          if (-not $p.HasExited -or $p.ExitCode -ne 0) { exit 1 }
       - name: Installer
         shell: pwsh
         run: |
